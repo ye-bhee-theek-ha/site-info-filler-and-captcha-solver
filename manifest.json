@@ -1,0 +1,17 @@
+{
+    "manifest_version": 3,
+    "name": "Simple Form Filler",
+    "version": "0.1",
+    "description": "Fills username and password fields with hardcoded values.",
+    "icons": {
+      "48": "icon48.png"
+    },
+    "content_scripts": [
+      {
+        "matches": ["<all_urls>"],
+        "js": ["content.js"],
+        "run_at": "document_idle" 
+      }
+    ]
+  }
+  
