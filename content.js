@@ -7,7 +7,7 @@ console.log("Combined Extension: Content Script Loaded.");
 // --- Hardcoded Credentials & Data (From Form Filler) ---
 const hardcodedUsername = "scorpio1000p@gmail.com";
 const hardcodedPassword = "Sd#Xy*jRrb7TJQV";
-const appointmentLocation = "Faisalabad";
+const appointmentLocation = "Karachi";
 const appointmentCategory = "Normal";
 const appointmentVisaType = "National Visa";
 const appointmentVisaSubType = "Study";
@@ -26,7 +26,8 @@ function log(message) {
 
 function isElementVisibleAndEnabled(element) {
     if (!element) return false;
-    if (element.disabled) {
+    // Check disabled property specifically for form elements that support it
+    if (typeof element.disabled !== 'undefined' && element.disabled) {
         // log(`Element ${element.id || element.tagName} is disabled.`);
         return false;
     }
@@ -45,29 +46,15 @@ function isElementVisibleAndEnabled(element) {
     }
 
     const rect = element.getBoundingClientRect();
-    // For form elements, zero dimensions usually mean not interactable.
-    // For labels or images, check dimensions carefully.
-    if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A', 'IMG', 'DIV'].includes(element.tagName)) { // Added DIV for box-label check
-        if (rect.width < 1 || rect.height < 1) { // Use < 1 to account for potential subpixel rendering issues
+    // Check dimensions (more reliable than offsetWidth/Height for some cases)
+    if (rect.width < 1 || rect.height < 1) {
+         // Allow zero dimensions for certain non-interactive elements if needed, but inputs/buttons should have size
+         if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A', 'IMG', 'SPAN'].includes(element.tagName)) { // SPAN for Kendo wrapper
             // log(`Element ${element.id || element.tagName} has zero or near-zero width or height.`);
             return false;
-        }
+         }
     }
 
-
-    // Check if element is within the viewport bounds (optional, can be too restrictive if scrolling is expected)
-    /*
-    const isInViewport = (
-        rect.top < window.innerHeight &&
-        rect.bottom >= 0 && // Element's bottom edge is below the top of the viewport
-        rect.left < window.innerWidth &&
-        rect.right >= 0 // Element's right edge is past the left of the viewport
-    );
-    if (!isInViewport) {
-        // log(`Element ${element.id || element.tagName} is outside the viewport.`);
-        return false;
-    }
-    */
 
     // Final check: walk up the DOM to see if any parent is display:none
     let parent = element.parentElement;
@@ -84,60 +71,98 @@ function isElementVisibleAndEnabled(element) {
 }
 
 
+/**
+ * Finds the interactable form element (input, select, textarea, or the hidden input/select within a Kendo dropdown)
+ * that is associated with a visible label containing the given text.
+ * Iterates through ALL labels, finds the parent container, checks container visibility,
+ * then finds the associated element within that container and checks its visibility. Returns the first valid match.
+ * @param {string} labelText - The text to search for within labels (case-insensitive, partial match).
+ * @param {string} [elementType='input, select, textarea'] - CSS selector for the target element types.
+ * @returns {HTMLElement|null} The interactable form element (potentially hidden if Kendo) or null if not found.
+ */
 function findVisibleElementNearLabel(labelText, elementType = 'input, select, textarea') {
-    const labels = document.querySelectorAll('label');
-    let potentialElements = [];
-    // log(`findVisibleElementNearLabel: Searching for label containing "${labelText}" for element type "${elementType}"`);
+    const labels = document.querySelectorAll(`label`); // Get all labels
+    log(`findVisibleElementNearLabel: Searching for label containing "${labelText}" for element type "${elementType}". Found ${labels.length} labels total.`);
+    let bestMatch = null;
 
-    labels.forEach(label => {
-        if (!isElementVisibleAndEnabled(label)) {
-            return;
-        }
+    for (const label of labels) { // Use for...of which is fine here
+        // Check if the label text matches first
         if (label.textContent.trim().toLowerCase().includes(labelText.toLowerCase())) {
-            let associatedElement = null;
-            const elementId = label.getAttribute('for');
-            if (elementId) {
-                associatedElement = document.getElementById(elementId);
+            // Find the specific parent container (adjust selector if needed, e.g., based on class 'mb-3')
+            const parentContainer = label.closest('div.mb-3'); // Assuming this container controls visibility
+            if (!parentContainer) {
+                // log(`Label "${label.textContent.trim()}" found, but no parent 'div.mb-3' found.`);
+                continue; // Skip if structure doesn't match
             }
-            if (!associatedElement) {
-                const parentContainer = label.closest('div, p, span, fieldset, li');
-                if (parentContainer) {
-                    associatedElement = parentContainer.querySelector(elementType + ', span.k-dropdown');
+
+            // *** Check visibility of the PARENT container first ***
+            if (isElementVisibleAndEnabled(parentContainer)) {
+                // log(`Label "${label.textContent.trim()}" found in a VISIBLE parent container.`);
+                // Then check the label itself (might be redundant if parent check is sufficient, but safe)
+                if (isElementVisibleAndEnabled(label)) {
+                    let finalElement = null;
+                    let visibilityCheckElement = null;
+                    const forId = label.getAttribute('for');
+
+                    // Try finding the element via 'for' attribute OR relative search WITHIN the visible container
+                    if (forId) {
+                        const elementById = document.getElementById(forId);
+                        if (elementById) {
+                            const kendoWrapper = elementById.closest('span.k-dropdown[role="listbox"]');
+                            if (kendoWrapper && (elementById.tagName === 'INPUT' || elementById.tagName === 'SELECT')) {
+                                finalElement = elementById;
+                                visibilityCheckElement = kendoWrapper;
+                            } else if (elementById.matches && elementById.matches(elementType)) {
+                                finalElement = elementById;
+                                visibilityCheckElement = elementById;
+                            }
+                        }
+                    }
+
+                    // If 'for' didn't work, search relatively within the visible container
+                    if (!finalElement) {
+                        // Search for Kendo wrapper OR direct element type within the specific parent container
+                        let foundRelative = parentContainer.querySelector('span.k-dropdown[role="listbox"], ' + elementType);
+                        // Next sibling check might be less reliable
+                        // if (!foundRelative && label.nextElementSibling && ...)
+
+                        if (foundRelative) {
+                            if (foundRelative.matches('span.k-dropdown[role="listbox"]')) {
+                                const kendoInput = foundRelative.querySelector('input[data-role="dropdownlist"], select[data-role="dropdownlist"]');
+                                if (kendoInput) {
+                                    finalElement = kendoInput;
+                                    visibilityCheckElement = foundRelative;
+                                }
+                            } else if (foundRelative.matches(elementType)) {
+                                finalElement = foundRelative;
+                                visibilityCheckElement = foundRelative;
+                            }
+                        }
+                    }
+
+                    // Final check: Is the target (or its wrapper) visible?
+                    if (finalElement && visibilityCheckElement && isElementVisibleAndEnabled(visibilityCheckElement)) {
+                        log(`Found VISIBLE candidate for label "${labelText}" (Actual Label: "${label.textContent.trim()}", Element ID: ${finalElement.id || 'N/A'}, Visibility Check on: ${visibilityCheckElement.id || visibilityCheckElement.tagName})`);
+                        bestMatch = finalElement; // Assign the candidate
+                        break; // *** Found the first fully visible match, stop searching ***
+                    }
+                } else {
+                     // log(`Label "${label.textContent.trim()}" has visible parent, but label itself is hidden.`);
                 }
-            }
-             if (!associatedElement && label.nextElementSibling && (elementType.toUpperCase().includes(label.nextElementSibling.tagName) || (label.nextElementSibling.matches && label.nextElementSibling.matches('span.k-dropdown')))) {
-                associatedElement = label.nextElementSibling;
-            }
-
-            if (associatedElement && associatedElement.matches && associatedElement.matches('span.k-dropdown')) {
-                const kendoInput = associatedElement.querySelector('input[data-role="dropdownlist"], select[data-role="dropdownlist"]');
-                if (kendoInput) {
-                    potentialElements.push({ wrapper: associatedElement, input: kendoInput, labelText: label.textContent.trim() });
-                    return;
-                }
-            } else if (associatedElement) {
-                 potentialElements.push({ input: associatedElement, labelText: label.textContent.trim() });
+            } else {
+                 // log(`Label "${label.textContent.trim()}" found, but its parent container is hidden.`);
             }
         }
-    });
+    } // End of label loop
 
-    for (const potential of potentialElements) {
-        let elementToCheckVisibility = potential.wrapper || potential.input;
-        let elementToReturn = potential.input;
-
-        if (elementToReturn && typeof elementToReturn.matches === 'function' && !potential.wrapper) {
-            if (!elementToReturn.matches(elementType)) {
-                continue;
-            }
-        }
-        if (isElementVisibleAndEnabled(elementToCheckVisibility)) {
-            log(`Found visible/enabled element for label "${labelText}" (Actual Label: "${potential.labelText}", Type: ${elementToReturn.tagName}, ID: ${elementToReturn.id || 'N/A'}).`);
-            return elementToReturn;
-        }
+    if (!bestMatch) {
+        log(`Could not find a visible/enabled element of type [${elementType}] associated with label "${labelText}" after checking all potentials.`);
+    } else {
+        log(`Selected element for "${labelText}" has ID: ${bestMatch.id || 'N/A'}`);
     }
-    log(`Could not find a visible/enabled element of type [${elementType}] associated with label "${labelText}" after checking all potentials.`);
-    return null;
+    return bestMatch; // Return the first valid match found, or null
 }
+
 
 function delay(ms) {
     log(`Waiting for ${ms}ms...`);
@@ -145,72 +170,8 @@ function delay(ms) {
 }
 
 
-// --- Kendo Interaction (to be run in page context - From Form Filler) ---
-function executeInPageContext(functionToExecute, ...args) {
-    const script = document.createElement('script');
-    const functionString = functionToExecute.toString().replace(/<\/script>/gi, '<\\/script>');
-    const argsString = args.map(arg => JSON.stringify(arg)).join(',');
-    script.textContent = `try { (${functionString})(${argsString}); } catch(e) { console.error('Error in page context execution for ${functionToExecute.name}:', e); }`;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
-    log(`Executed function in page context: ${functionToExecute.name}`);
-}
-
-function setKendoDropdownValue(elementId, textToSelect) {
-    // This function runs in the page's context
-    try {
-        const dropdown = window.jQuery('#' + elementId).data('kendoDropDownList');
-        if (!dropdown) {
-            console.error('Kendo Injector: Kendo DropDownList not found for ID:', elementId);
-            return false;
-        }
-        const dataSource = dropdown.dataSource;
-        const selectValue = () => {
-            const data = dataSource.data();
-            let valueFound = null;
-            let textFound = null;
-            console.log(`Kendo Injector: Searching for "${textToSelect}" in #${elementId}. Options available:`, data.map(d => d.Name || d.text || d));
-
-            for (let i = 0; i < data.length; i++) {
-                const item = data[i];
-                const itemName = item.Name || item.text;
-                const itemValue = item.Id !== undefined ? item.Id :
-                                  item.Value !== undefined ? item.Value :
-                                  item.value !== undefined ? item.value :
-                                  itemName;
-
-                if (itemName && itemName.trim().toLowerCase() === textToSelect.trim().toLowerCase()) {
-                    valueFound = itemValue;
-                    textFound = itemName;
-                    break;
-                }
-            }
-
-            if (valueFound !== null) {
-                console.log(`Kendo Injector: Setting value for #${elementId} to:`, valueFound, `(matched text: "${textFound}")`);
-                dropdown.value(valueFound);
-                setTimeout(() => {
-                    dropdown.trigger('change');
-                    console.log(`Kendo Injector: Triggered change for #${elementId}`);
-                }, 100);
-            } else {
-                console.warn(`Kendo Injector: Could not find value for text "${textToSelect}" in #${elementId}.`);
-            }
-        };
-
-        if (dataSource.data().length > 0) {
-            console.log(`Kendo Injector: Data for #${elementId} seems already loaded.`);
-            selectValue();
-        } else {
-            console.log(`Kendo Injector: Data for #${elementId} not loaded, fetching...`);
-            dataSource.fetch(selectValue);
-        }
-        return true;
-    } catch (err) {
-        console.error(`Kendo Injector: Error setting dropdown value for #${elementId}:`, err);
-        return false;
-    }
-}
+// --- Kendo Interaction ---
+// *** REMOVED executeInPageContext and setKendoDropdownValue (will be handled via background script) ***
 
 
 // --- Popup Handling (From Form Filler) ---
@@ -268,30 +229,28 @@ function getCaptchaInstruction() {
         return null;
     }
 
-    const labels = Array.from(instructionContainer.querySelectorAll('div.box-label')); // Convert to array for easier processing
+    const labels = Array.from(instructionContainer.querySelectorAll('div.box-label'));
     log(`CAPTCHA: getCaptchaInstruction - Found ${labels.length} potential labels in instruction container.`);
 
     let highestZIndex = -1;
     let targetLabelElement = null;
 
     for (const label of labels) {
+        const parentContainer = label.closest('div.col-12');
+        if (!parentContainer || !isElementVisibleAndEnabled(parentContainer)) {
+            continue;
+        }
         if (isElementVisibleAndEnabled(label)) {
             const style = window.getComputedStyle(label);
-            const zIndex = parseInt(style.zIndex, 10); // Get computed z-index
+            const zIndex = parseInt(style.zIndex, 10);
 
-            // log(`CAPTCHA: Visible Label (ID: ${label.id || 'no id'}, Text: "${label.textContent.trim().substring(0,30)}...") - z-index: ${style.zIndex}`);
-
-            if (!isNaN(zIndex)) { // If zIndex is a number
+            if (!isNaN(zIndex)) {
                 if (zIndex > highestZIndex) {
                     highestZIndex = zIndex;
                     targetLabelElement = label;
                 }
             } else if (targetLabelElement === null) {
-                // If zIndex is 'auto' or not set, and we haven't found a numerically z-indexed one yet,
-                // consider this one. This makes the first visible 'auto' z-index label a candidate.
-                // This part might need refinement if 'auto' z-index elements are layered complexly.
-                // For now, prioritize explicit z-index. If none, take first visible.
-                if (highestZIndex === -1) { // Only if no numeric z-index has been found yet
+                if (highestZIndex === -1) {
                     targetLabelElement = label;
                 }
             }
@@ -299,13 +258,11 @@ function getCaptchaInstruction() {
     }
 
     if (!targetLabelElement) {
-        // Fallback: If no label with a numeric z-index was found, or none were visible,
-        // try finding the first visible one again as a last resort.
-        // This handles cases where z-index isn't used for layering, but simple display:none.
         for (const label of labels) {
-            if (isElementVisibleAndEnabled(label)) {
+             const parentContainer = label.closest('div.col-12');
+             if (parentContainer && isElementVisibleAndEnabled(parentContainer) && isElementVisibleAndEnabled(label)) {
                 targetLabelElement = label;
-                log(`CAPTCHA: Fallback - Found first visible instruction label (ID: ${label.id || 'no id'}) as no higher z-index was found.`);
+                log(`CAPTCHA: Fallback - Found first visible instruction label (ID: ${label.id || 'no id'}) in visible parent container.`);
                 break;
             }
         }
@@ -313,7 +270,7 @@ function getCaptchaInstruction() {
 
 
     if (!targetLabelElement) {
-        log("CAPTCHA: Could not find a suitable visible instruction label based on z-index or visibility.");
+        log("CAPTCHA: Could not find a suitable visible instruction label based on parent visibility, self-visibility, or z-index.");
         return null;
     }
 
@@ -345,9 +302,12 @@ function getCaptchaImagesData() {
     let visibleAndExtractedCount = 0;
 
     for (const img of allImageElementsInGrid) {
+        const parentDiv = img.closest('.col-4[id]');
+        if (!parentDiv || !isElementVisibleAndEnabled(parentDiv)) {
+            continue;
+        }
         if (isElementVisibleAndEnabled(img)) {
-            const parentDiv = img.closest('.col-4[id]');
-            if (img.src && parentDiv && parentDiv.id && img.src.startsWith('data:image')) {
+            if (img.src && parentDiv.id && img.src.startsWith('data:image')) {
                 const base64Part = img.src.split(',')[1];
                 if (base64Part) {
                     imagesData.base64Images.push(base64Part);
@@ -356,7 +316,7 @@ function getCaptchaImagesData() {
                 } else {
                     log(`CAPTCHA WARN: Visible Image (ID: ${parentDiv.id}) has data URL but no Base64 part.`);
                 }
-            } else if (parentDiv && parentDiv.id) {
+            } else if (parentDiv.id) {
                  log(`CAPTCHA WARN: Visible Image (ID: ${parentDiv.id}) src is not a data URL or missing src/id. Src: ${img.src ? img.src.substring(0,30) : 'N/A'}`);
             }
         }
@@ -430,6 +390,16 @@ function triggerCaptchaSolver() {
 
 // --- Main Automation Logic (From Form Filler) ---
 async function runAutomation() {
+    const usernameFieldForCheck = findVisibleElementNearLabel("Email", "input");
+    const passwordFieldForCheck = findVisibleElementNearLabel("Password", "input");
+    const verifyButtonForCheck = document.querySelector('#btnVerify');
+    const isOnEmailPage = usernameFieldForCheck && !passwordFieldForCheck && verifyButtonForCheck;
+
+    if (isOnEmailPage) {
+        log("Detected Email Page, clearing automation pause flag.");
+        sessionStorage.removeItem(AUTOMATION_PAUSED_KEY);
+    }
+
     if (window.location.pathname.includes('/Global/newcaptcha/logincaptcha')) {
         log("On CAPTCHA page. Form filling logic in runAutomation will be limited.");
         const passwordFieldOnCaptchaPage = findVisibleElementNearLabel("Password", "input");
@@ -462,7 +432,7 @@ async function runAutomation() {
     if (usernameField && isElementVisibleAndEnabled(usernameField) &&
         !findVisibleElementNearLabel("Password", "input") &&
         isElementVisibleAndEnabled(verifyButton)) {
-        log("On Email Page.");
+        log("On Email Page (and not paused).");
         await delay(200);
         if (usernameField.value !== hardcodedUsername) {
             usernameField.value = hardcodedUsername;
@@ -485,15 +455,17 @@ async function runAutomation() {
         return;
     }
 
+    log("Checking if on Appointment Form Page...");
     const locationInputCheck = findVisibleElementNearLabel("Location");
     const appointmentForLabelCheck = Array.from(document.querySelectorAll('label')).find(
         label => label.textContent.trim().startsWith("Appointment For") && isElementVisibleAndEnabled(label)
     );
 
     if (locationInputCheck && appointmentForLabelCheck) {
-        log("On Appointment Form Page.");
+        log("On Appointment Form Page. Starting to fill...");
         await delay(1000);
-        log("Filling appointment form...");
+
+        log("Step 1: Selecting 'Individual' radio button...");
         const appointmentForDiv = appointmentForLabelCheck.closest('div.mb-3');
         let visibleIndividualRadio = null;
         if (appointmentForDiv) {
@@ -511,38 +483,80 @@ async function runAutomation() {
             visibleIndividualRadio.click();
             visibleIndividualRadio.dispatchEvent(new Event('change', { bubbles: true }));
             await delay(500); checkForAndClosePopups(); await delay(500);
-        } else if (visibleIndividualRadio) { log("'Individual' radio already checked or selection triggered."); }
-        else { log("Could not find visible 'Individual' radio button."); return; }
+        } else if (visibleIndividualRadio && visibleIndividualRadio.checked) {
+            log("'Individual' radio already checked.");
+        } else {
+            log("ERROR: Could not find visible 'Individual' radio button. Stopping form fill.");
+            return;
+        }
 
-        const locationInput = findVisibleElementNearLabel("Location");
-        const categoryInput = findVisibleElementNearLabel("Category");
-        const visaTypeInput = findVisibleElementNearLabel("Visa Type");
+        log("Step 2: Filling Kendo Dropdowns...");
 
-        if (locationInput && locationInput.id) {
-            log(`Setting Location dropdown (#${locationInput.id}) to "${appointmentLocation}"`);
-            executeInPageContext(setKendoDropdownValue, locationInput.id, appointmentLocation);
-            await delay(1000); checkForAndClosePopups(); await delay(500);
-        } else { log("Could not find Location dropdown input."); return; }
+        // Function to handle setting a dropdown and waiting
+        async function setDropdownAndWait(label, value) {
+            const inputElement = findVisibleElementNearLabel(label);
+            if (inputElement && inputElement.id) {
+                log(`Requesting to set ${label} dropdown (#${inputElement.id}) to "${value}"`);
+                // Send message to background to execute script
+                try {
+                     const response = await chrome.runtime.sendMessage({
+                         action: "setDropdownValue",
+                         data: { elementId: inputElement.id, value: value }
+                     });
+                     log(`Response from background for setting ${label}:`, response);
+                     if (!response || !response.success) {
+                         throw new Error(`Background script failed to set ${label}. Error: ${response?.error || 'Unknown error'}`);
+                     }
+                     // Wait longer after Visa Type as it triggers sub-type loading
+                     const waitTime = label === "Visa Type" ? 3000 : 1500;
+                     await delay(waitTime);
+                     checkForAndClosePopups();
+                     await delay(500);
+                     return true; // Indicate success
+                } catch (error) {
+                     log(`ERROR setting ${label} dropdown: ${error.message}`);
+                     alert(`Error setting ${label}. Please check console.`);
+                     return false; // Indicate failure
+                }
+            } else {
+                log(`ERROR: Could not find ${label} dropdown input. Stopping form fill.`);
+                return false; // Indicate failure
+            }
+        }
 
-        if (categoryInput && categoryInput.id) {
-             log(`Setting Category dropdown (#${categoryInput.id}) to "${appointmentCategory}"`);
-            executeInPageContext(setKendoDropdownValue, categoryInput.id, appointmentCategory);
-            await delay(1000); checkForAndClosePopups(); await delay(500);
-        } else { log("Could not find Category dropdown input."); return; }
+        // Set dropdowns sequentially, stopping if one fails
+        if (!await setDropdownAndWait("Location", appointmentLocation)) return;
+        if (!await setDropdownAndWait("Category", appointmentCategory)) return;
+        if (!await setDropdownAndWait("Visa Type", appointmentVisaType)) return;
 
-        if (visaTypeInput && visaTypeInput.id) {
-             log(`Setting Visa Type dropdown (#${visaTypeInput.id}) to "${appointmentVisaType}"`);
-            executeInPageContext(setKendoDropdownValue, visaTypeInput.id, appointmentVisaType);
-            await delay(2000); checkForAndClosePopups(); await delay(500);
-        } else { log("Could not find Visa Type dropdown input."); return; }
-
+        // Re-find Sub Type after waiting for Visa Type to be set
         const visaSubTypeInput = findVisibleElementNearLabel("Visa Sub Type");
-        if (visaSubTypeInput && visaSubTypeInput.id) {
+         if (visaSubTypeInput && visaSubTypeInput.id) {
              log(`Setting Visa Sub Type dropdown (#${visaSubTypeInput.id}) to "${appointmentVisaSubType}"`);
-            executeInPageContext(setKendoDropdownValue, visaSubTypeInput.id, appointmentVisaSubType);
-            await delay(1000); checkForAndClosePopups(); await delay(500);
-        } else { log("Could not find Visa Sub Type dropdown input after setting Visa Type."); }
+             // Send message to background to execute script
+             try {
+                  const response = await chrome.runtime.sendMessage({
+                      action: "setDropdownValue",
+                      data: { elementId: visaSubTypeInput.id, value: appointmentVisaSubType }
+                  });
+                  log(`Response from background for setting Visa Sub Type:`, response);
+                  if (!response || !response.success) {
+                       throw new Error(`Background script failed to set Visa Sub Type. Error: ${response?.error || 'Unknown error'}`);
+                  }
+                  await delay(1200);
+                  checkForAndClosePopups();
+                  await delay(500);
+             } catch (error) {
+                  log(`ERROR setting Visa Sub Type dropdown: ${error.message}`);
+                  alert(`Error setting Visa Sub Type. Please check console.`);
+                  // Don't necessarily stop here, maybe it's optional or user can fix
+             }
+         } else {
+             log("WARN: Could not find Visa Sub Type dropdown input after setting Visa Type. Continuing...");
+         }
 
+
+        log("Step 3: Clicking Submit button...");
         await delay(500);
         const submitButton = document.querySelector('#btnSubmit');
         if (submitButton && isElementVisibleAndEnabled(submitButton)) {
@@ -550,7 +564,9 @@ async function runAutomation() {
             submitButton.click();
             log("Setting automation paused flag.");
             sessionStorage.setItem(AUTOMATION_PAUSED_KEY, 'true');
-        } else { log("Appointment Submit button (#btnSubmit) not found or not interactable."); }
+        } else {
+            log("Appointment Submit button (#btnSubmit) not found or not interactable.");
+        }
         return;
     }
     log("No specific form stage detected by runAutomation. Observer will watch for CAPTCHA if on CAPTCHA page.");
@@ -634,7 +650,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         alert(`CAPTCHA Solver Error: ${message.error}. Please solve manually.`);
         captchaSolverInitiated = false;
     }
-    return false;
+    // Indicate if the listener will respond asynchronously (only needed if using sendResponse after async work)
+    // Return true if you might call sendResponse later, false otherwise.
+    return false; // We are not using sendResponse asynchronously here.
 });
 
 
