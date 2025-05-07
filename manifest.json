@@ -1,17 +1,29 @@
 {
     "manifest_version": 3,
-    "name": "Simple Form Filler",
-    "version": "0.1",
-    "description": "Fills username and password fields with hardcoded values.",
-    "icons": {
-      "48": "icon48.png"
+    "name": "Combined Form Filler & Captcha Solver",
+    "version": "1.0",
+    "description": "Automatically fills forms and solves the specific number grid CAPTCHA using NoCaptchaAI.",
+    "permissions": [
+      "scripting",
+      "storage"   
+    ],
+    "host_permissions": [
+      "https://api.nocaptchaai.com/*", 
+      "https://ita-pak.blsinternational.com/*",
+      "https://appointment.theitalyvisa.com/*"
+    ],
+    "background": {
+      "service_worker": "background.js"
     },
     "content_scripts": [
       {
-        "matches": ["<all_urls>"],
+        "matches": ["https://ita-pak.blsinternational.com/*", "https://appointment.theitalyvisa.com/*"],
         "js": ["content.js"],
         "run_at": "document_idle" 
       }
-    ]
+    ],
+    "icons": {
+      "48": "icon48.png"
+    }
   }
   
