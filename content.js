@@ -7,13 +7,19 @@ console.log("Combined Extension: Content Script Loaded.");
 // --- Hardcoded Credentials & Data (From Form Filler) ---
 const hardcodedUsername = "scorpio1000p@gmail.com";
 const hardcodedPassword = "Sd#Xy*jRrb7TJQV";
-const appointmentLocation = "Karachi";
+const appointmentLocation = "Karachi"; // Updated Location
 const appointmentCategory = "Normal";
 const appointmentVisaType = "National Visa";
 const appointmentVisaSubType = "Study";
 
 // --- State Management ---
 const AUTOMATION_PAUSED_KEY = 'simpleFillerAutomationPaused';
+const APPOINTMENT_URL_PATH = "/Global/Appointment/VisaType"; // Path to redirect to if paused
+// *** List of known CAPTCHA page paths ***
+const CAPTCHA_URL_PATHS = [
+    '/Global/newcaptcha/logincaptcha',
+    '/Global/Appointment/AppointmentCaptcha'
+];
 let captchaSolverInitiated = false; // Flag to prevent multiple triggers
 let captchaCheckTimeout = null; // Timeout handle for debouncing observer calls
 
@@ -26,8 +32,7 @@ function log(message) {
 
 function isElementVisibleAndEnabled(element) {
     if (!element) return false;
-    // Check disabled property specifically for form elements that support it
-    if (typeof element.disabled !== 'undefined' && element.disabled) {
+    if (element.disabled) {
         // log(`Element ${element.id || element.tagName} is disabled.`);
         return false;
     }
@@ -46,15 +51,29 @@ function isElementVisibleAndEnabled(element) {
     }
 
     const rect = element.getBoundingClientRect();
-    // Check dimensions (more reliable than offsetWidth/Height for some cases)
-    if (rect.width < 1 || rect.height < 1) {
-         // Allow zero dimensions for certain non-interactive elements if needed, but inputs/buttons should have size
-         if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A', 'IMG', 'SPAN'].includes(element.tagName)) { // SPAN for Kendo wrapper
+    // For form elements, zero dimensions usually mean not interactable.
+    // For labels or images, check dimensions carefully.
+    if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A', 'IMG', 'DIV', 'SPAN'].includes(element.tagName)) { // Added SPAN for Kendo wrapper
+        if (rect.width < 1 || rect.height < 1) { // Use < 1 to account for potential subpixel rendering issues
             // log(`Element ${element.id || element.tagName} has zero or near-zero width or height.`);
             return false;
-         }
+        }
     }
 
+
+    // Check if element is within the viewport bounds (optional, can be too restrictive if scrolling is expected)
+    /*
+    const isInViewport = (
+        rect.top < window.innerHeight &&
+        rect.bottom >= 0 && // Element's bottom edge is below the top of the viewport
+        rect.left < window.innerWidth &&
+        rect.right >= 0 // Element's right edge is past the left of the viewport
+    );
+    if (!isInViewport) {
+        // log(`Element ${element.id || element.tagName} is outside the viewport.`);
+        return false;
+    }
+    */
 
     // Final check: walk up the DOM to see if any parent is display:none
     let parent = element.parentElement;
@@ -171,7 +190,8 @@ function delay(ms) {
 
 
 // --- Kendo Interaction ---
-// *** REMOVED executeInPageContext and setKendoDropdownValue (will be handled via background script) ***
+// *** REMOVED executeInPageContext and setKendoDropdownValue ***
+// *** These are now handled via background script messaging ***
 
 
 // --- Popup Handling (From Form Filler) ---
@@ -223,6 +243,11 @@ function checkForAndClosePopups() {
 // --- CAPTCHA Solving Functions ---
 
 function getCaptchaInstruction() {
+    // *** Updated: Check if we are on a known CAPTCHA page first ***
+    const currentPath = window.location.pathname;
+    const isOnCaptchaPage = CAPTCHA_URL_PATHS.some(path => currentPath.includes(path));
+    if (!isOnCaptchaPage) return null; // Don't search if not on a CAPTCHA page
+
     const instructionContainer = document.querySelector('.main-div-container > .row.no-gutters.text-center');
     if (!instructionContainer) {
         log("CAPTCHA: getCaptchaInstruction - Could not find instruction container.");
@@ -289,6 +314,11 @@ function getCaptchaInstruction() {
 }
 
 function getCaptchaImagesData() {
+    // *** Updated: Check if we are on a known CAPTCHA page first ***
+    const currentPath = window.location.pathname;
+    const isOnCaptchaPage = CAPTCHA_URL_PATHS.some(path => currentPath.includes(path));
+    if (!isOnCaptchaPage) return null; // Don't search if not on a CAPTCHA page
+
     const gridContainer = document.querySelector('div.p-3.row');
     if (!gridContainer) {
         log("CAPTCHA: getCaptchaImagesData - Could not find the grid container (div.p-3.row).");
@@ -374,33 +404,48 @@ function triggerCaptchaSolver() {
                 if (chrome.runtime.lastError) {
                     log("CAPTCHA ERROR: Error sending message to background:", chrome.runtime.lastError.message);
                     alert(`CAPTCHA Solver Error: Could not communicate with background. ${chrome.runtime.lastError.message}`);
-                    captchaSolverInitiated = false;
+                    captchaSolverInitiated = false; // Reset flag on send error
                 } else { log("CAPTCHA: Message sent to background script."); }
             });
         } else {
              log(`CAPTCHA ERROR: triggerCaptchaSolver - Mismatch/Insufficient count after extraction (Images: ${base64Images.length}, IDs: ${imageIds.length}). Expected 9. Solver not triggered.`);
-             captchaSolverInitiated = false;
+             captchaSolverInitiated = false; // Reset flag
         }
     } else {
         log(`CAPTCHA: triggerCaptchaSolver - Failed to extract necessary data (targetNumber: ${targetNumber}, images: ${imagesDataResult ? imagesDataResult.base64Images.length : 'null'}). Conditions not met. Solver not triggered.`);
-        captchaSolverInitiated = false;
+        captchaSolverInitiated = false; // Reset flag
     }
 }
 
 
 // --- Main Automation Logic (From Form Filler) ---
 async function runAutomation() {
+    const currentPath = window.location.pathname;
+    log(`runAutomation: Current path: ${currentPath}`);
+
     const usernameFieldForCheck = findVisibleElementNearLabel("Email", "input");
     const passwordFieldForCheck = findVisibleElementNearLabel("Password", "input");
     const verifyButtonForCheck = document.querySelector('#btnVerify');
     const isOnEmailPage = usernameFieldForCheck && !passwordFieldForCheck && verifyButtonForCheck;
 
+    // Clear pause flag only if truly on the initial email page
     if (isOnEmailPage) {
         log("Detected Email Page, clearing automation pause flag.");
         sessionStorage.removeItem(AUTOMATION_PAUSED_KEY);
     }
 
-    if (window.location.pathname.includes('/Global/newcaptcha/logincaptcha')) {
+    // Check pause flag AFTER potentially clearing it
+    // Note: The actual redirect logic if paused is now handled by initiateAutomation
+    if (sessionStorage.getItem(AUTOMATION_PAUSED_KEY) === 'true') {
+        log("Automation is paused for this session. No actions will be taken by runAutomation.");
+        return;
+    }
+
+    // --- Proceed with automation checks if not paused ---
+
+    // Check if on a known CAPTCHA page
+    const isOnCaptchaPage = CAPTCHA_URL_PATHS.some(path => currentPath.includes(path));
+    if (isOnCaptchaPage) {
         log("On CAPTCHA page. Form filling logic in runAutomation will be limited.");
         const passwordFieldOnCaptchaPage = findVisibleElementNearLabel("Password", "input");
         if (passwordFieldOnCaptchaPage && isElementVisibleAndEnabled(passwordFieldOnCaptchaPage) && passwordFieldOnCaptchaPage.value === "") {
@@ -414,24 +459,22 @@ async function runAutomation() {
         } else if (!passwordFieldOnCaptchaPage) {
             log("Password field not found on CAPTCHA page by runAutomation.");
         }
+        // Let the observer handle the CAPTCHA trigger
         return;
     }
 
-    log("Running automation check...");
-
-    if (sessionStorage.getItem(AUTOMATION_PAUSED_KEY) === 'true') {
-        log("Automation is paused for this session.");
-        return;
-    }
+    log("Running automation check (not on CAPTCHA page)...");
 
     await delay(300); checkForAndClosePopups(); await delay(300);
 
+    // Re-check elements for Email page logic
     const usernameField = findVisibleElementNearLabel("Email", "input");
-    const verifyButton = document.querySelector('#btnVerify');
+    const verifyButton = document.querySelector('#btnVerify'); // Re-find verify button
 
     if (usernameField && isElementVisibleAndEnabled(usernameField) &&
-        !findVisibleElementNearLabel("Password", "input") &&
+        !findVisibleElementNearLabel("Password", "input") && // Ensure password field is NOT present
         isElementVisibleAndEnabled(verifyButton)) {
+        // This block should now only run if the pause flag was cleared above
         log("On Email Page (and not paused).");
         await delay(200);
         if (usernameField.value !== hardcodedUsername) {
@@ -443,18 +486,41 @@ async function runAutomation() {
         await delay(150);
         log("Clicking Verify button (from Email Page).");
         verifyButton.click();
-        return;
+        return; // Expecting navigation
     }
 
-    const bookLink = Array.from(document.querySelectorAll('a.nav-link'))
-                           .find(a => a.textContent.trim() === "Book New Appointment" && isElementVisibleAndEnabled(a));
+    // --- Stage 2: "Book New Appointment" Link ---
+    log("Checking for 'Book New Appointment' link/button...");
+    let bookLink = Array.from(document.querySelectorAll('a.nav-link'))
+                           .find(a => a.textContent.trim().toLowerCase() === "book new appointment" && isElementVisibleAndEnabled(a));
+
+    if (!bookLink) { // If nav-link not found or not visible, try the card button
+        log("'a.nav-link' for booking not found or not visible. Checking for card button...");
+        const cardContainer = document.querySelector('div.position-absolute.top-100.start-50.translate-middle');
+        if (cardContainer && isElementVisibleAndEnabled(cardContainer)) {
+            bookLink = cardContainer.querySelector('a.btn.btn-primary-soft'); // More specific selector
+            if (bookLink && bookLink.textContent.trim().toLowerCase() === "book now" && isElementVisibleAndEnabled(bookLink)) {
+                log("Found 'Book Now' card button.");
+            } else {
+                bookLink = null; // Reset if not the correct visible button
+                log("'Book Now' card button not found or not visible/correct text.");
+            }
+        } else {
+            log("Alternative booking card container not found or not visible.");
+        }
+    } else {
+        log("Found 'Book New Appointment' in nav-link.");
+    }
+
     if (bookLink) {
-        log("Found 'Book New Appointment' link, clicking.");
+        log("Found a way to book appointment, clicking.");
         await delay(300);
         bookLink.click();
-        return;
+        return; // Expecting navigation
     }
 
+
+    // --- Stage 3: Appointment Form ---
     log("Checking if on Appointment Form Page...");
     const locationInputCheck = findVisibleElementNearLabel("Location");
     const appointmentForLabelCheck = Array.from(document.querySelectorAll('label')).find(
@@ -463,7 +529,7 @@ async function runAutomation() {
 
     if (locationInputCheck && appointmentForLabelCheck) {
         log("On Appointment Form Page. Starting to fill...");
-        await delay(1000);
+        await delay(1500); // *** Increased initial delay for appointment form ***
 
         log("Step 1: Selecting 'Individual' radio button...");
         const appointmentForDiv = appointmentForLabelCheck.closest('div.mb-3');
@@ -482,7 +548,7 @@ async function runAutomation() {
             log("Clicking 'Individual' radio button.");
             visibleIndividualRadio.click();
             visibleIndividualRadio.dispatchEvent(new Event('change', { bubbles: true }));
-            await delay(500); checkForAndClosePopups(); await delay(500);
+            await delay(750); checkForAndClosePopups(); await delay(750); // Increased delay
         } else if (visibleIndividualRadio && visibleIndividualRadio.checked) {
             log("'Individual' radio already checked.");
         } else {
@@ -492,12 +558,11 @@ async function runAutomation() {
 
         log("Step 2: Filling Kendo Dropdowns...");
 
-        // Function to handle setting a dropdown and waiting
+        // Function to handle setting a dropdown and waiting (using message passing)
         async function setDropdownAndWait(label, value) {
             const inputElement = findVisibleElementNearLabel(label);
             if (inputElement && inputElement.id) {
-                log(`Requesting to set ${label} dropdown (#${inputElement.id}) to "${value}"`);
-                // Send message to background to execute script
+                log(`Requesting background to set ${label} dropdown (#${inputElement.id}) to "${value}"`);
                 try {
                      const response = await chrome.runtime.sendMessage({
                          action: "setDropdownValue",
@@ -505,17 +570,23 @@ async function runAutomation() {
                      });
                      log(`Response from background for setting ${label}:`, response);
                      if (!response || !response.success) {
+                         if (response?.error?.includes("not found")) {
+                             log(`WARN: Option "${value}" not found for ${label} dropdown (#${inputElement.id}).`);
+                             alert(`Option "${value}" not found for ${label}. Stopping automation.`);
+                             return false;
+                         }
                          throw new Error(`Background script failed to set ${label}. Error: ${response?.error || 'Unknown error'}`);
                      }
-                     // Wait longer after Visa Type as it triggers sub-type loading
-                     const waitTime = label === "Visa Type" ? 3000 : 1500;
+                     const waitTime = label === "Visa Type" ? 3500 : 2000; // *** Increased delays ***
+                     log(`Waiting ${waitTime}ms after setting ${label}...`);
                      await delay(waitTime);
                      checkForAndClosePopups();
                      await delay(500);
+                     log(`Finished waiting after setting ${label}.`);
                      return true; // Indicate success
                 } catch (error) {
                      log(`ERROR setting ${label} dropdown: ${error.message}`);
-                     alert(`Error setting ${label}. Please check console.`);
+                     alert(`Error setting ${label}. Check console. CSP might be blocking interaction.`);
                      return false; // Indicate failure
                 }
             } else {
@@ -532,8 +603,7 @@ async function runAutomation() {
         // Re-find Sub Type after waiting for Visa Type to be set
         const visaSubTypeInput = findVisibleElementNearLabel("Visa Sub Type");
          if (visaSubTypeInput && visaSubTypeInput.id) {
-             log(`Setting Visa Sub Type dropdown (#${visaSubTypeInput.id}) to "${appointmentVisaSubType}"`);
-             // Send message to background to execute script
+             log(`Requesting background to set Visa Sub Type dropdown (#${visaSubTypeInput.id}) to "${appointmentVisaSubType}"`);
              try {
                   const response = await chrome.runtime.sendMessage({
                       action: "setDropdownValue",
@@ -541,15 +611,18 @@ async function runAutomation() {
                   });
                   log(`Response from background for setting Visa Sub Type:`, response);
                   if (!response || !response.success) {
-                       throw new Error(`Background script failed to set Visa Sub Type. Error: ${response?.error || 'Unknown error'}`);
+                       if (response?.error?.includes("not found")) {
+                           log(`WARN: Option "${appointmentVisaSubType}" not found for Visa Sub Type dropdown (#${visaSubTypeInput.id}). Continuing...`);
+                       } else {
+                           throw new Error(`Background script failed to set Visa Sub Type. Error: ${response?.error || 'Unknown error'}`);
+                       }
                   }
-                  await delay(1200);
+                  await delay(1500); // Increased delay
                   checkForAndClosePopups();
                   await delay(500);
              } catch (error) {
                   log(`ERROR setting Visa Sub Type dropdown: ${error.message}`);
-                  alert(`Error setting Visa Sub Type. Please check console.`);
-                  // Don't necessarily stop here, maybe it's optional or user can fix
+                  alert(`Error setting Visa Sub Type. Check console. CSP might be blocking interaction.`);
              }
          } else {
              log("WARN: Could not find Visa Sub Type dropdown input after setting Visa Type. Continuing...");
@@ -567,7 +640,7 @@ async function runAutomation() {
         } else {
             log("Appointment Submit button (#btnSubmit) not found or not interactable.");
         }
-        return;
+        return; // End of appointment form stage
     }
     log("No specific form stage detected by runAutomation. Observer will watch for CAPTCHA if on CAPTCHA page.");
 }
@@ -628,27 +701,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             sessionStorage.setItem(AUTOMATION_PAUSED_KEY, 'true');
                         } else {
                             log("CAPTCHA: Could not find or click the final submit button after CAPTCHA selection. Please check selectors or ensure it's visible/enabled.");
-                            captchaSolverInitiated = false;
+                            captchaSolverInitiated = false; // Reset flag to allow retry if submit fails
                         }
                     }, message.indices.length * 200 + 750);
 
                 } else {
                      log(`CAPTCHA ERROR: Received originalIds array with length ${message.originalIds.length}, expected 9.`);
-                     captchaSolverInitiated = false;
+                     captchaSolverInitiated = false; // Reset flag
                 }
             } else {
                 log("CAPTCHA: No matching image indices received from background.");
                 alert("CAPTCHA Solver: No matching images found by the API. Please solve manually.");
-                captchaSolverInitiated = false;
+                captchaSolverInitiated = false; // Reset flag
             }
         } else {
             log("CAPTCHA ERROR: Invalid 'clickMatchingImages' message format received:", message);
-            captchaSolverInitiated = false;
+            captchaSolverInitiated = false; // Reset flag
         }
     } else if (message.action === "captchaError") {
         log("CAPTCHA ERROR: Received error from background script:", message.error);
         alert(`CAPTCHA Solver Error: ${message.error}. Please solve manually.`);
-        captchaSolverInitiated = false;
+        captchaSolverInitiated = false; // Reset flag on error
     }
     // Indicate if the listener will respond asynchronously (only needed if using sendResponse after async work)
     // Return true if you might call sendResponse later, false otherwise.
@@ -659,12 +732,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // --- Function to check for CAPTCHA and trigger solver (can be called initially and by observer) ---
 function attemptCaptchaDetectionAndSolve() {
     log("CAPTCHA: attemptCaptchaDetectionAndSolve CALLED.");
-    if (!window.location.pathname.includes('/Global/newcaptcha/logincaptcha')) {
+    // *** Updated URL Check ***
+    const currentPath = window.location.pathname;
+    const isOnCaptchaPage = CAPTCHA_URL_PATHS.some(path => currentPath.includes(path));
+
+    if (!isOnCaptchaPage) {
         if (captchaSolverInitiated) {
             log("CAPTCHA: Navigated away from CAPTCHA page during an attempt, resetting solver flag.");
             captchaSolverInitiated = false;
         }
-        return;
+        return; // Not on a CAPTCHA page
     }
 
     if (captchaSolverInitiated) {
@@ -690,12 +767,16 @@ function attemptCaptchaDetectionAndSolve() {
 const observerCallback = (mutationsList, observer) => {
     // log("CAPTCHA Observer: Mutation detected."); // Can be very noisy
 
-    if (!window.location.pathname.includes('/Global/newcaptcha/logincaptcha')) {
+    // *** Updated URL Check ***
+    const currentPath = window.location.pathname;
+    const isOnCaptchaPage = CAPTCHA_URL_PATHS.some(path => currentPath.includes(path));
+
+    if (!isOnCaptchaPage) {
         if (captchaSolverInitiated) {
             log("CAPTCHA Observer: Navigated away from CAPTCHA page, resetting solver flag.");
             captchaSolverInitiated = false;
         }
-        return;
+        return; // Not on a CAPTCHA page
     }
 
     if (captchaSolverInitiated) {
@@ -714,9 +795,52 @@ const observer = new MutationObserver(observerCallback);
 observer.observe(document.body, { childList: true, subtree: true });
 log("MutationObserver set up to watch for CAPTCHA elements.");
 
+// --- Function to check pause state and redirect ---
+async function checkAndHandlePauseStateContentScript() {
+    log("Checking pause state in content script...");
+    if (sessionStorage.getItem(AUTOMATION_PAUSED_KEY) === 'true') {
+        log(`Automation is paused. Waiting 5 seconds before redirecting to ${APPOINTMENT_URL_PATH}...`);
+        sessionStorage.removeItem(AUTOMATION_PAUSED_KEY); // Clear flag immediately
+        log(`Pause flag "${AUTOMATION_PAUSED_KEY}" removed.`);
+        await delay(5000); // Wait 5 seconds
+        // *** Add check: Only redirect if NOT already on the target page ***
+        if (!window.location.pathname.includes(APPOINTMENT_URL_PATH)) {
+            log(`Redirecting now to ${APPOINTMENT_URL_PATH}.`);
+            window.location.href = APPOINTMENT_URL_PATH; // Redirect
+        } else {
+            log(`Already on target page (${APPOINTMENT_URL_PATH}), skipping redirect.`);
+        }
+        return true; // Indicate that it was paused and handled
+    } else {
+        log("Automation is not paused.");
+        return false; // Indicate it was not paused
+    }
+}
+
+
 // --- Initial Run & Initial CAPTCHA Check ---
-setTimeout(() => {
-    runAutomation();
-    log("Attempting initial CAPTCHA check after runAutomation...");
-    attemptCaptchaDetectionAndSolve();
-}, 1500);
+async function initiateAutomation() {
+    log("Initiating automation sequence...");
+    // Check pause state directly in content script first
+    const wasPaused = await checkAndHandlePauseStateContentScript();
+
+    if (!wasPaused) {
+        // If not paused, proceed with normal automation flow after a delay
+        log("Proceeding with automation.");
+        await delay(1500); // Wait a bit before starting
+        runAutomation();
+        // *** REMOVED initial CAPTCHA check here - let observer handle it ***
+        // The observer will call attemptCaptchaDetectionAndSolve if/when needed on the correct page
+    } else {
+        log("Automation was paused, redirection may have occurred or was skipped. If not redirected, runAutomation will now proceed.");
+         // If redirection was skipped because we were already on the appointment page,
+         // we still need to run the automation logic for that page.
+         if (window.location.pathname.includes(APPOINTMENT_URL_PATH)) {
+             await delay(500); // Short delay after clearing flag
+             runAutomation();
+         }
+    }
+}
+
+// Call the function that starts the process
+initiateAutomation();
